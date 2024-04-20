@@ -40,20 +40,11 @@ public class Server {
                     SocketChannel socketChannel = serverSocketChannel.accept();
                     socketChannel.configureBlocking(false);
                     socketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-                    continue;
-                }
-//                else if(selectionKey.isWritable()){
-//                    System.out.println("Writing to client...");
-//                    SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
-//                    socketChannel.write(Charset.defaultCharset().encode(CharBuffer.wrap("Hello client!!!")));
-//                    socketChannel.close();
-//                    socketChannel.socket().close();
-//                }
-                if(selectionKey.isReadable()){
+
+                }else if(selectionKey.isReadable()){
                     System.out.println("Reading from client...");
                     SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
                     handleRequest(socketChannel);
-                    continue;
                 }
             }
         }
@@ -73,18 +64,41 @@ public class Server {
                 request.append(character);
             }
             System.out.println("From client: " + request);
-
             String[] requestData = request.toString().split(" ");
-
-            if(requestData[0].equals("addTopic")){
-                TopicNetInfo topicNetInfo = new Gson().fromJson(
-                        requestData[1], TopicNetInfo.class
-                );
-                topics.add(topicNetInfo);
-                topics.forEach(System.out::println);
+            switch (requestData[0]){
+                case "addTopic" -> {
+                    TopicNetInfo topicNetInfo = new Gson().fromJson(
+                            requestData[1], TopicNetInfo.class
+                    );
+                    if(!topics.contains(topicNetInfo)) {
+                        topics.add(topicNetInfo);
+                    }
+                    topics.forEach(System.out::println);
+                }
+                case "rmTopic" -> {
+                    TopicNetInfo topicNetInfo = new Gson().fromJson(
+                            requestData[1], TopicNetInfo.class
+                    );
+                    topics.removeIf(tNI -> tNI.name.equals(topicNetInfo.name));
+                    topics.forEach(System.out::println);
+                }
+                case "addArticle" -> {
+                    TopicNetInfo topicNetInfo = new Gson().fromJson(
+                            requestData[1], TopicNetInfo.class
+                    );
+                    if(!topics.contains(topicNetInfo)) return;
+                    topics.get(topics.indexOf(topicNetInfo))
+                            .headers.add(requestData[2]);
+                    topics.forEach(System.out::println);
+                }
+                case "exit" -> {
+                    System.out.println("Client has disconnected");
+                    socketChannel.close();
+                    socketChannel.socket().close();
+                }
             }
-
         }catch (IOException exception){
+            System.out.println("Client has disconnected: ");
             exception.printStackTrace();
             try{
                 socketChannel.close();
