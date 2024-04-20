@@ -1,11 +1,15 @@
 package emk4;
 
+import com.google.gson.Gson;
+import emk4.JSON.TopicNetInfo;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
+import java.util.Scanner;
 
 public class Publisher {
 
@@ -21,21 +25,29 @@ public class Publisher {
 
 
         ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
-        CharBuffer charBuffer = null;
-        while (true){
-            byteBuffer.clear();
-            int readBytes = socketChannel.read(byteBuffer);
-            if(readBytes == 0) continue;
-            else if(readBytes == -1) break;
-            else{
-                byteBuffer.flip();
-                charBuffer = Charset.defaultCharset().decode(byteBuffer);
-                String response = charBuffer.toString();
-                System.out.println(response);
-                charBuffer.clear();
-            }
+        CharBuffer charBuffer;
+
+
+        while(true) {
+            Scanner scanner = new Scanner(System.in);
+            String command = scanner.nextLine();
+            String topicName = scanner.nextLine();
+            String topicNetInfoJSON = new Gson().toJson(new TopicNetInfo(
+                    topicName
+            ));
+            charBuffer = CharBuffer.wrap(command + " " + topicNetInfoJSON);
+            socketChannel.write(Charset.defaultCharset().encode(charBuffer));
         }
+//            byteBuffer.clear();
+//            int readBytes = socketChannel.read(byteBuffer);
+//            byteBuffer.flip();
+//            charBuffer = Charset.defaultCharset().decode(byteBuffer);
+//            String response = charBuffer.toString();
+//            System.out.println("Response: " + response);
+//            charBuffer.clear();
+
     }
+
 
     public static void main(String[] args) throws IOException {
         new Publisher("localhost", 8383);
