@@ -1,6 +1,7 @@
 package emk4;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import emk4.JSON.TopicNetInfo;
 
 import java.io.IOException;
@@ -19,8 +20,6 @@ public class Server {
     private final ServerSocketChannel serverSocketChannel;
     private final Selector selector;
     private final List<TopicNetInfo> topics;
-
-
     public Server(String ipAddress, int port) throws IOException {
         topics = new ArrayList<>();
         serverSocketChannel = ServerSocketChannel.open();
@@ -40,7 +39,6 @@ public class Server {
                     SocketChannel socketChannel = serverSocketChannel.accept();
                     socketChannel.configureBlocking(false);
                     socketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-
                 }else if(selectionKey.isReadable()){
                     System.out.println("Reading from client...");
                     SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
@@ -65,41 +63,39 @@ public class Server {
             }
             System.out.println("From client: " + request);
             String[] requestData = request.toString().split(" ");
-            switch (requestData[0]){
-                case "addTopic" -> {
-                    TopicNetInfo topicNetInfo = new Gson().fromJson(
-                            requestData[1], TopicNetInfo.class
-                    );
-                    if(!topics.contains(topicNetInfo)) {
-                        topics.add(topicNetInfo);
+            try {
+                switch (requestData[0]) {
+                    case "addTopic" -> {
+                        TopicNetInfo topicNetInfo = new Gson().fromJson(
+                                requestData[1], TopicNetInfo.class
+                        );
+                        if (!topics.contains(topicNetInfo)) {
+                            topics.add(topicNetInfo);
+                        }
+                        topics.forEach(System.out::println);
                     }
-                    topics.forEach(System.out::println);
+                    case "rmTopic" -> {
+                        TopicNetInfo topicNetInfo = new Gson().fromJson(
+                                requestData[1], TopicNetInfo.class
+                        );
+                        topics.removeIf(tNI -> tNI.name.equals(topicNetInfo.name));
+                        topics.forEach(System.out::println);
+                    }
+                    case "addArticle" -> {
+                        TopicNetInfo topicNetInfo = new Gson().fromJson(
+                                requestData[1], TopicNetInfo.class
+                        );
+                        if (!topics.contains(topicNetInfo)) return;
+                        topics.get(topics.indexOf(topicNetInfo))
+                                .headers.add(requestData[2]);
+                        topics.forEach(System.out::println);
+                    }
                 }
-                case "rmTopic" -> {
-                    TopicNetInfo topicNetInfo = new Gson().fromJson(
-                            requestData[1], TopicNetInfo.class
-                    );
-                    topics.removeIf(tNI -> tNI.name.equals(topicNetInfo.name));
-                    topics.forEach(System.out::println);
-                }
-                case "addArticle" -> {
-                    TopicNetInfo topicNetInfo = new Gson().fromJson(
-                            requestData[1], TopicNetInfo.class
-                    );
-                    if(!topics.contains(topicNetInfo)) return;
-                    topics.get(topics.indexOf(topicNetInfo))
-                            .headers.add(requestData[2]);
-                    topics.forEach(System.out::println);
-                }
-                case "exit" -> {
-                    System.out.println("Client has disconnected");
-                    socketChannel.close();
-                    socketChannel.socket().close();
-                }
+            }catch (JsonSyntaxException exception){
+                System.out.println(exception.getMessage());
             }
         }catch (IOException exception){
-            System.out.println("Client has disconnected: ");
-            exception.printStackTrace();
+            System.out.println("Client has disconnected");
             try{
                 socketChannel.close();
                 socketChannel.socket().close();
