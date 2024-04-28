@@ -1,9 +1,12 @@
 package emk4;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
+import emk4.JSON.ClientNetInfo;
+import emk4.JSON.Request;
+import emk4.JSON.Response;
 import emk4.JSON.TopicNetInfo;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -19,9 +22,11 @@ public class Server {
 
     private final ServerSocketChannel serverSocketChannel;
     private final Selector selector;
-    private final List<TopicNetInfo> topics;
+    private final Map<String, Set<UUID>> topicToSubscriberUUIDs;
+    private final Map<UUID, List<String>> subscriberUUIDToNewsQueue;
     public Server(String ipAddress, int port) throws IOException {
-        topics = new ArrayList<>();
+        topicToSubscriberUUIDs = new HashMap<>();
+        subscriberUUIDToNewsQueue = new HashMap<>();
         serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.socket().bind(new InetSocketAddress(ipAddress, port));
         serverSocketChannel.configureBlocking(false);
@@ -38,18 +43,40 @@ public class Server {
                     System.out.println("Client has connected to the server");
                     SocketChannel socketChannel = serverSocketChannel.accept();
                     socketChannel.configureBlocking(false);
-                    socketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-                }else if(selectionKey.isReadable()){
-                    System.out.println("Reading from client...");
+                    socketChannel.register(selector, SelectionKey.OP_READ  | SelectionKey.OP_WRITE);
+                }else if(selectionKey.isReadable()) {
                     SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
-                    handleRequest(socketChannel);
+                    handleRequest(socketChannel, selectionKey);
+                }else if(selectionKey.isWritable()){
+                    SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
+                    List<String> newsQueue = (List<String>) selectionKey.attachment();
+                    if (newsQueue != null){
+                        if(!newsQueue.isEmpty()){
+                            System.out.println(new GsonBuilder()
+                                    .setPrettyPrinting()
+                                    .create()
+                                    .toJson(newsQueue)
+                            );
+                            sendNewsToSubscriber(socketChannel, new Gson().toJson(newsQueue));
+                            newsQueue.clear();
+                        }
+                    }
                 }
             }
         }
     }
+
+    private void sendNewsToSubscriber(SocketChannel socketChannel, String newsQueueJSON) throws IOException {
+        socketChannel.write(
+                Charset.defaultCharset().encode(
+                        CharBuffer.wrap(newsQueueJSON)
+                )
+        );
+    }
+
     private ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
 
-    private void handleRequest(SocketChannel socketChannel){
+    private void handleRequest(SocketChannel socketChannel, SelectionKey selectionKey){
         try {
             byteBuffer.clear();
             socketChannel.read(byteBuffer);
@@ -62,36 +89,53 @@ public class Server {
                 request.append(character);
             }
             System.out.println("From client: " + request);
-            String[] requestData = request.toString().split(" ");
+            Request incomingRequest = new Gson().fromJson(request.toString(), Request.class);
             try {
-                switch (requestData[0]) {
-                    case "addTopic" -> {
-                        TopicNetInfo topicNetInfo = new Gson().fromJson(
-                                requestData[1], TopicNetInfo.class
-                        );
-                        if (!topics.contains(topicNetInfo)) {
-                            topics.add(topicNetInfo);
+                if(incomingRequest.role.equals(Request.Role.ADMIN)) {
+                    switch (incomingRequest.command) {
+                        case ADD_TOPIC -> {
+                            if(topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)) {
+                                sendResponse("Topic already exists", socketChannel);
+                                return;
+                            }
+                            topicToSubscriberUUIDs.put(incomingRequest.topicName, new HashSet<>());
+                            System.out.println(new GsonBuilder()
+                                    .setPrettyPrinting()
+                                    .create()
+                                    .toJson(topicToSubscriberUUIDs)
+                            );
                         }
-                        topics.forEach(System.out::println);
+                        case ADD_NEWS -> {
+                            topicToSubscriberUUIDs.get(incomingRequest.topicName)
+                                    .forEach(subscriber -> subscriberUUIDToNewsQueue
+                                            .get(subscriber)
+                                            .add(incomingRequest.newsHeader)
+                                    );
+                            System.out.println(new GsonBuilder()
+                                    .setPrettyPrinting()
+                                    .create()
+                                    .toJson(subscriberUUIDToNewsQueue)
+                            );
+                        }
                     }
-                    case "rmTopic" -> {
-                        TopicNetInfo topicNetInfo = new Gson().fromJson(
-                                requestData[1], TopicNetInfo.class
-                        );
-                        topics.removeIf(tNI -> tNI.name.equals(topicNetInfo.name));
-                        topics.forEach(System.out::println);
-                    }
-                    case "addArticle" -> {
-                        TopicNetInfo topicNetInfo = new Gson().fromJson(
-                                requestData[1], TopicNetInfo.class
-                        );
-                        if (!topics.contains(topicNetInfo)) return;
-                        topics.get(topics.indexOf(topicNetInfo))
-                                .headers.add(requestData[2]);
-                        topics.forEach(System.out::println);
+                }else if(incomingRequest.role.equals(Request.Role.CLIENT)){
+                    switch ((incomingRequest.command)){
+                        case SUBSCRIBE -> {
+                            List<String> subscriberQueue = new ArrayList<>();
+                            selectionKey.attach(subscriberQueue);
+                            subscriberUUIDToNewsQueue.put(incomingRequest.senderId, subscriberQueue);
+                            topicToSubscriberUUIDs.get(incomingRequest.topicName).add(incomingRequest.senderId);
+                            System.out.println(new GsonBuilder()
+                                    .setPrettyPrinting()
+                                    .create()
+                                    .toJson(topicToSubscriberUUIDs)
+                            );
+                        }
                     }
                 }
+                sendResponse("200 OK", socketChannel);
             }catch (JsonSyntaxException exception){
+                System.out.println("Command parameters not recognized: ");
                 System.out.println(exception.getMessage());
             }
         }catch (IOException exception){
@@ -103,6 +147,16 @@ public class Server {
         }
     }
 
+
+    public void sendResponse(String message, SocketChannel socketChannel) throws IOException {
+        socketChannel.write(Charset.defaultCharset().encode(
+                CharBuffer.wrap(
+                        new Gson().toJson(
+                                new Response(message)
+                        )
+                )
+        ));
+    }
 
     public static void main(String[] args) throws IOException {
         new Server("localhost", 8383);
