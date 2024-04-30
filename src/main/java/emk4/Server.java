@@ -3,10 +3,9 @@ package emk4;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
-import emk4.JSON.ClientNetInfo;
 import emk4.JSON.Request;
 import emk4.JSON.Response;
-import emk4.JSON.TopicNetInfo;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -19,18 +18,15 @@ import java.nio.charset.Charset;
 import java.util.*;
 
 public class Server {
-
-    private final ServerSocketChannel serverSocketChannel;
-    private final Selector selector;
     private final Map<String, Set<UUID>> topicToSubscriberUUIDs;
-    private final Map<UUID, List<String>> subscriberUUIDToNewsQueue;
+    private final Map<UUID, List<QueueItem>> subscriberUUIDToNewsQueue;
     public Server(String ipAddress, int port) throws IOException {
         topicToSubscriberUUIDs = new HashMap<>();
         subscriberUUIDToNewsQueue = new HashMap<>();
-        serverSocketChannel = ServerSocketChannel.open();
+        ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.socket().bind(new InetSocketAddress(ipAddress, port));
         serverSocketChannel.configureBlocking(false);
-        selector = Selector.open();
+        Selector selector = Selector.open();
         serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
         System.out.println("Listening for request...");
         while(true){
@@ -49,16 +45,20 @@ public class Server {
                     handleRequest(socketChannel, selectionKey);
                 }else if(selectionKey.isWritable()){
                     SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
-                    List<String> newsQueue = (List<String>) selectionKey.attachment();
-                    if (newsQueue != null){
-                        if(!newsQueue.isEmpty()){
+                    List<QueueItem> subscriberQueue = (List<QueueItem>) selectionKey.attachment();
+                    if (subscriberQueue != null){
+                        if(!subscriberQueue.isEmpty()){
+                            System.out.println("Sending : " );
+                            subscriberQueue.forEach(System.out::println);
                             System.out.println(new GsonBuilder()
                                     .setPrettyPrinting()
                                     .create()
-                                    .toJson(newsQueue)
+                                    .toJson(subscriberQueue)
                             );
-                            sendNewsToSubscriber(socketChannel, new Gson().toJson(newsQueue));
-                            newsQueue.clear();
+                            sendNewsToSubscriber(socketChannel, new Gson().toJson(
+                                    new Response(subscriberQueue)
+                            ));
+                            subscriberQueue.clear();
                         }
                     }
                 }
@@ -74,70 +74,31 @@ public class Server {
         );
     }
 
-    private ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
+    private final ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
 
     private void handleRequest(SocketChannel socketChannel, SelectionKey selectionKey){
         try {
-            byteBuffer.clear();
-            socketChannel.read(byteBuffer);
-            byteBuffer.flip();
-            StringBuilder request = new StringBuilder();
-            CharBuffer charBuffer = Charset.defaultCharset().decode(byteBuffer);
-            while (charBuffer.hasRemaining()) {
-                char character = charBuffer.get();
-                if (character == '\r' || character == '\n') return;
-                request.append(character);
-            }
-            System.out.println("From client: " + request);
-            Request incomingRequest = new Gson().fromJson(request.toString(), Request.class);
+            Request incomingRequest = new Gson().fromJson(getRequest(socketChannel), Request.class);
             try {
                 if(incomingRequest.role.equals(Request.Role.ADMIN)) {
                     switch (incomingRequest.command) {
-                        case ADD_TOPIC -> {
-                            if(topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)) {
-                                sendResponse("Topic already exists", socketChannel);
-                                return;
-                            }
-                            topicToSubscriberUUIDs.put(incomingRequest.topicName, new HashSet<>());
-                            System.out.println(new GsonBuilder()
-                                    .setPrettyPrinting()
-                                    .create()
-                                    .toJson(topicToSubscriberUUIDs)
-                            );
-                        }
-                        case ADD_NEWS -> {
-                            topicToSubscriberUUIDs.get(incomingRequest.topicName)
-                                    .forEach(subscriber -> subscriberUUIDToNewsQueue
-                                            .get(subscriber)
-                                            .add(incomingRequest.newsHeader)
-                                    );
-                            System.out.println(new GsonBuilder()
-                                    .setPrettyPrinting()
-                                    .create()
-                                    .toJson(subscriberUUIDToNewsQueue)
-                            );
-                        }
+                        case ADD_TOPIC -> addTopic(incomingRequest, socketChannel);
+                        case REMOVE_TOPIC -> removeTopic(incomingRequest, socketChannel);
+                        case ADD_NEWS -> addNews(incomingRequest, socketChannel);
                     }
                 }else if(incomingRequest.role.equals(Request.Role.CLIENT)){
                     switch ((incomingRequest.command)){
-                        case SUBSCRIBE -> {
-                            List<String> subscriberQueue = new ArrayList<>();
-                            selectionKey.attach(subscriberQueue);
-                            subscriberUUIDToNewsQueue.put(incomingRequest.senderId, subscriberQueue);
-                            topicToSubscriberUUIDs.get(incomingRequest.topicName).add(incomingRequest.senderId);
-                            System.out.println(new GsonBuilder()
-                                    .setPrettyPrinting()
-                                    .create()
-                                    .toJson(topicToSubscriberUUIDs)
-                            );
-                        }
+                        case SUBSCRIBE -> addSubscription(incomingRequest, socketChannel);
+                        case UNSUBSCRIBE -> removeSubscription(incomingRequest, socketChannel);
+                        case REGISTER_CLIENT -> registerClient(incomingRequest, selectionKey, socketChannel);
                     }
                 }
-                sendResponse("200 OK", socketChannel);
+                sendResponse("200 OK", incomingRequest.command, socketChannel);
             }catch (JsonSyntaxException exception){
+                sendResponse("500 Something went wrong", incomingRequest.command, socketChannel);
                 System.out.println("Command parameters not recognized: ");
                 System.out.println(exception.getMessage());
-            }
+            }catch(IOException ignored){}
         }catch (IOException exception){
             System.out.println("Client has disconnected");
             try{
@@ -147,12 +108,149 @@ public class Server {
         }
     }
 
+    private void registerClient(Request incomingRequest, SelectionKey selectionKey, SocketChannel socketChannel) throws IOException {
+        List<QueueItem> subscriberQueue = new ArrayList<>();
+        subscriberUUIDToNewsQueue.put(
+                incomingRequest.senderId,
+                subscriberQueue
+        );
+        selectionKey.attach(subscriberQueue);
+    }
 
-    public void sendResponse(String message, SocketChannel socketChannel) throws IOException {
+    private void removeSubscription(Request incomingRequest, SocketChannel socketChannel) throws IOException {
+        if(!topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)
+            || !topicToSubscriberUUIDs.get(incomingRequest.topicName).contains(incomingRequest.senderId)){
+            sendResponse("404 Topic not found", incomingRequest.command, socketChannel);
+            throw new IOException("404 Topic not found");
+        }
+        topicToSubscriberUUIDs.get(incomingRequest.topicName).remove(incomingRequest.senderId);
+        subscriberUUIDToNewsQueue.remove(incomingRequest.senderId);
+    }
+
+    private void removeTopic(Request incomingRequest, SocketChannel socketChannel) throws IOException {
+        if(!topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)){
+            sendResponse("404 Topic not found", incomingRequest.command, socketChannel);
+            throw new IOException("404 Topic not found");
+        }
+        topicToSubscriberUUIDs.get(incomingRequest.topicName)
+                .forEach(subscriber -> subscriberUUIDToNewsQueue
+                        .get(subscriber)
+                        .add(new QueueItem(
+                                incomingRequest.topicName,
+                                QueueItem.Operation.DELETED,
+                                QueueItem.Type.TOPIC
+                        )));
+        topicToSubscriberUUIDs.remove(incomingRequest.topicName);
+        System.out.println(new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(topicToSubscriberUUIDs)
+        );
+        Set<UUID> subscribersUUIDS = subscriberUUIDToNewsQueue.keySet();
+        System.out.println(new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(subscriberUUIDToNewsQueue)
+        );
+        for(UUID subscriberUUID : subscribersUUIDS){
+            System.out.println("Adding: " + subscriberUUID.toString() + " to broadcast");
+            subscriberUUIDToNewsQueue.get(subscriberUUID)
+                    .add(
+                            new QueueItem(
+                                    incomingRequest.topicName,
+                                    QueueItem.Operation.DELETED,
+                                    QueueItem.Type.TOPIC
+                            )
+                    );
+        }
+    }
+
+    private void addSubscription(Request incomingRequest, SocketChannel socketChannel) throws IOException {
+        if(!topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)){
+            sendResponse("404 Topic not found", incomingRequest.command, socketChannel);
+            throw new IOException("404 Topic not found");
+        }
+        topicToSubscriberUUIDs.get(incomingRequest.topicName).add(incomingRequest.senderId);
+        System.out.println(new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(topicToSubscriberUUIDs)
+        );
+    }
+
+
+    private void addNews(Request incomingRequest, SocketChannel socketChannel) throws IOException {
+        if(!topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)){
+            sendResponse("404 Topic not found", incomingRequest.command, socketChannel);
+            throw new IOException("404 Topic not found");
+        }
+        topicToSubscriberUUIDs.get(incomingRequest.topicName)
+                .forEach(subscriber -> subscriberUUIDToNewsQueue
+                        .get(subscriber)
+                        .add(new QueueItem(
+                                incomingRequest.topicName,
+                                incomingRequest.newsHeader,
+                                QueueItem.Operation.ADDED,
+                                QueueItem.Type.NEWS
+                        ))
+                );
+        System.out.println(new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(subscriberUUIDToNewsQueue)
+        );
+    }
+
+    private void addTopic(Request incomingRequest, SocketChannel socketChannel) throws IOException {
+        if(topicToSubscriberUUIDs.containsKey(incomingRequest.topicName)) {
+            sendResponse("400 Topic already exists", incomingRequest.command, socketChannel);
+            throw new IOException("404 Topic exists");
+        }
+        topicToSubscriberUUIDs.put(incomingRequest.topicName, new HashSet<>());
+        Set<UUID> subscribersUUIDS = subscriberUUIDToNewsQueue.keySet();
+        System.out.println(new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(subscriberUUIDToNewsQueue)
+        );
+        for(UUID subscriberUUID : subscribersUUIDS){
+            System.out.println("Adding: " + subscriberUUID.toString() + " to broadcast");
+            subscriberUUIDToNewsQueue.get(subscriberUUID)
+                    .add(
+                            new QueueItem(
+                                    incomingRequest.topicName,
+                                    QueueItem.Operation.ADDED,
+                                    QueueItem.Type.TOPIC
+                            )
+                    );
+        }
+        System.out.println(new GsonBuilder()
+                .setPrettyPrinting()
+                .create()
+                .toJson(topicToSubscriberUUIDs)
+        );
+    }
+
+
+    private String getRequest(SocketChannel socketChannel) throws IOException {
+        byteBuffer.clear();
+        socketChannel.read(byteBuffer);
+        byteBuffer.flip();
+        StringBuilder request = new StringBuilder();
+        CharBuffer charBuffer = Charset.defaultCharset().decode(byteBuffer);
+        while (charBuffer.hasRemaining()) {
+            char character = charBuffer.get();
+            if (character == '\r' || character == '\n') break;
+            request.append(character);
+        }
+        return request.toString();
+    }
+
+    public void sendResponse(String message, Request.Command commandType, SocketChannel socketChannel) throws IOException {
         socketChannel.write(Charset.defaultCharset().encode(
                 CharBuffer.wrap(
                         new Gson().toJson(
-                                new Response(message)
+                                new Response(message, commandType)
                         )
                 )
         ));
